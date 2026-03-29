@@ -290,17 +290,36 @@ nav {
 .example-text { color: var(--text2); font-style: italic; font-size: 0.88rem; margin-top: 4px; padding-left: 16px; }
 .synonyms { margin-top: 8px; font-size: 0.85rem; }
 .synonyms span { color: var(--text2); }
+.word-tags { margin-top: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.word-tags-label { font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap; padding: 2px 0; }
+.word-tags-label.syn { color: var(--primary); }
+.word-tags-label.ant { color: var(--danger); }
 .synonym-tag {
   display: inline-block;
-  background: var(--surface2);
+  background: rgba(66,133,244,0.1);
+  border: 1px solid rgba(66,133,244,0.2);
   border-radius: 10px;
-  padding: 1px 8px;
-  margin: 2px 3px;
+  padding: 2px 9px;
+  margin: 2px 2px;
   font-size: 0.8rem;
   cursor: pointer;
   color: var(--primary);
+  transition: all 0.15s;
 }
-.synonym-tag:hover { background: var(--primary); color: white; }
+.synonym-tag:hover { background: var(--primary); color: white; border-color: var(--primary); }
+.antonym-tag {
+  display: inline-block;
+  background: rgba(234,67,53,0.08);
+  border: 1px solid rgba(234,67,53,0.2);
+  border-radius: 10px;
+  padding: 2px 9px;
+  margin: 2px 2px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  color: var(--danger);
+  transition: all 0.15s;
+}
+.antonym-tag:hover { background: var(--danger); color: white; border-color: var(--danger); }
 
 /* ===== LOADING & ERROR ===== */
 .loading-wrap {
@@ -999,10 +1018,31 @@ function renderFreeResults(container, entries) {
         ${def.example ? `<div class="example-text">"${esc(def.example)}"</div>` : ''}
       </div>`;
     });
-    if (meaning.synonyms?.length) {
-      html += `<div class="synonyms"><span>유의어: </span>
-        ${meaning.synonyms.slice(0,8).map(s =>
-          `<span class="synonym-tag" onclick="searchWord('${esc(s)}')">${esc(s)}</span>`
+
+    // Collect synonyms: meaning-level + definition-level, deduplicated
+    const synSet = new Set([
+      ...(meaning.synonyms || []),
+      ...(meaning.definitions || []).flatMap(d => d.synonyms || [])
+    ]);
+    // Collect antonyms: meaning-level + definition-level, deduplicated
+    const antSet = new Set([
+      ...(meaning.antonyms || []),
+      ...(meaning.definitions || []).flatMap(d => d.antonyms || [])
+    ]);
+
+    if (synSet.size > 0) {
+      html += `<div class="word-tags">
+        <span class="word-tags-label syn">유의어</span>
+        ${[...synSet].slice(0, 10).map(s =>
+          `<button class="synonym-tag" onclick="searchWord('${esc(s)}')">${esc(s)}</button>`
+        ).join('')}
+      </div>`;
+    }
+    if (antSet.size > 0) {
+      html += `<div class="word-tags">
+        <span class="word-tags-label ant">반의어</span>
+        ${[...antSet].slice(0, 10).map(s =>
+          `<button class="antonym-tag" onclick="searchWord('${esc(s)}')">${esc(s)}</button>`
         ).join('')}
       </div>`;
     }
@@ -1075,26 +1115,37 @@ function saveWordToHistory(word, result) {
   const lw = word.toLowerCase();
   const existing = history.find(h => h.word.toLowerCase() === lw);
 
-  // extract defs & examples
-  let defs = [], examples = [];
+  // extract defs, examples, synonyms, antonyms
+  let defs = [], examples = [], synonyms = [], antonyms = [];
   if (result.type === 'free') {
     for (const e of result.data) {
       for (const m of (e.meanings || [])) {
+        // meaning-level
+        if (m.synonyms?.length) synonyms.push(...m.synonyms);
+        if (m.antonyms?.length) antonyms.push(...m.antonyms);
         for (const d of (m.definitions || [])) {
           if (d.definition) defs.push(d.definition);
           if (d.example) examples.push(d.example);
+          // definition-level
+          if (d.synonyms?.length) synonyms.push(...d.synonyms);
+          if (d.antonyms?.length) antonyms.push(...d.antonyms);
         }
       }
     }
+    // deduplicate
+    synonyms = [...new Set(synonyms)];
+    antonyms = [...new Set(antonyms)];
   }
 
   if (existing) {
     existing.count = (existing.count || 1) + 1;
     existing.lastTs = Date.now();
-    if (defs.length)  existing.defs = defs;
+    if (defs.length)     existing.defs = defs;
     if (examples.length) existing.examples = examples;
+    if (synonyms.length) existing.synonyms = synonyms;
+    if (antonyms.length) existing.antonyms = antonyms;
   } else {
-    history.unshift({ word, ts: Date.now(), lastTs: Date.now(), count: 1, defs, examples });
+    history.unshift({ word, ts: Date.now(), lastTs: Date.now(), count: 1, defs, examples, synonyms, antonyms });
     if (history.length > 500) history.pop();
   }
   localStorage.setItem('dapp_history', JSON.stringify(history));
