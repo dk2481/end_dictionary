@@ -320,6 +320,7 @@ nav {
   transition: all 0.15s;
 }
 .antonym-tag:hover { background: var(--danger); color: white; border-color: var(--danger); }
+.datamuse-block { border-top: 1px dashed var(--border) !important; margin-top: 4px; }
 
 /* ===== LOADING & ERROR ===== */
 .loading-wrap {
@@ -952,14 +953,16 @@ async function doSearch() {
   const container = document.getElementById('resultsContainer');
   container.innerHTML = `<div class="loading-wrap"><div class="spinner"></div><p>검색 중...</p></div>`;
   try {
-    let result;
-    if (settings.api === 'mw' && settings.mwKey) {
-      result = await fetchMW(word);
-    } else {
-      result = await fetchFree(word);
-    }
-    saveWordToHistory(word, result);
-    renderResults(result);
+    // Fetch dictionary + Datamuse synonyms/antonyms in parallel
+    const dictPromise = (settings.api === 'mw' && settings.mwKey) ? fetchMW(word) : fetchFree(word);
+    const [dictResult, damuseResult] = await Promise.allSettled([dictPromise, fetchDatamuse(word)]);
+
+    if (dictResult.status === 'rejected') throw dictResult.reason;
+    const result  = dictResult.value;
+    const datamuse = damuseResult.status === 'fulfilled' ? damuseResult.value : { synonyms: [], antonyms: [] };
+
+    saveWordToHistory(word, result, datamuse);
+    renderResults(result, datamuse);
     renderHistory();
   } catch(e) {
     container.innerHTML = `<div class="error-card">❌ <strong>"${esc(word)}"</strong>를 찾을 수 없습니다.<br><small style="opacity:0.7">${esc(e.message)}</small></div>`;
@@ -982,16 +985,32 @@ async function fetchMW(word) {
   return { type: 'mw', data };
 }
 
-function renderResults(result) {
-  const container = document.getElementById('resultsContainer');
-  if (result.type === 'free') {
-    renderFreeResults(container, result.data);
-  } else {
-    renderMWResults(container, result.data);
+async function fetchDatamuse(word) {
+  try {
+    const [synRes, antRes] = await Promise.all([
+      fetch(`https://api.datamuse.com/words?rel_syn=${encodeURIComponent(word)}&max=20`),
+      fetch(`https://api.datamuse.com/words?rel_ant=${encodeURIComponent(word)}&max=15`)
+    ]);
+    const [synData, antData] = await Promise.all([synRes.json(), antRes.json()]);
+    return {
+      synonyms: synData.map(w => w.word),
+      antonyms: antData.map(w => w.word)
+    };
+  } catch {
+    return { synonyms: [], antonyms: [] };
   }
 }
 
-function renderFreeResults(container, entries) {
+function renderResults(result, datamuse = { synonyms: [], antonyms: [] }) {
+  const container = document.getElementById('resultsContainer');
+  if (result.type === 'free') {
+    renderFreeResults(container, result.data, datamuse);
+  } else {
+    renderMWResults(container, result.data, datamuse);
+  }
+}
+
+function renderFreeResults(container, entries, datamuse = { synonyms: [], antonyms: [] }) {
   let html = '';
   const entry = entries[0];
   const word   = entry.word || '';
@@ -1008,6 +1027,10 @@ function renderFreeResults(container, entries) {
     </div>
     ${phon ? `<div class="phonetic">${esc(phon)}</div>` : ''}`;
 
+  // Track all synonyms/antonyms shown per-meaning (to avoid duplication in Datamuse section)
+  const shownSyns = new Set();
+  const shownAnts = new Set();
+
   for (const meaning of (entry.meanings || [])) {
     html += `<div class="meaning-block">
       <div class="pos-badge">${esc(meaning.partOfSpeech || '')}</div>`;
@@ -1019,16 +1042,18 @@ function renderFreeResults(container, entries) {
       </div>`;
     });
 
-    // Collect synonyms: meaning-level + definition-level, deduplicated
+    // Collect Free Dictionary synonyms/antonyms per meaning
     const synSet = new Set([
       ...(meaning.synonyms || []),
       ...(meaning.definitions || []).flatMap(d => d.synonyms || [])
     ]);
-    // Collect antonyms: meaning-level + definition-level, deduplicated
     const antSet = new Set([
       ...(meaning.antonyms || []),
       ...(meaning.definitions || []).flatMap(d => d.antonyms || [])
     ]);
+
+    synSet.forEach(s => shownSyns.add(s));
+    antSet.forEach(s => shownAnts.add(s));
 
     if (synSet.size > 0) {
       html += `<div class="word-tags">
@@ -1048,11 +1073,48 @@ function renderFreeResults(container, entries) {
     }
     html += `</div>`;
   }
+
+  // Datamuse 보강 섹션 — Free Dictionary에 없는 유의어/반의어 추가 표시
+  const dmSyns = datamuse.synonyms.filter(s => !shownSyns.has(s));
+  const dmAnts = datamuse.antonyms.filter(s => !shownAnts.has(s));
+  const hasDmData = dmSyns.length > 0 || dmAnts.length > 0 || datamuse.antonyms.length > 0;
+
+  if (hasDmData) {
+    // Show ALL antonyms from Datamuse (since Free Dict rarely has them)
+    const allAnts = [...new Set([...shownAnts, ...datamuse.antonyms])];
+    // Show extra synonyms from Datamuse not already shown
+    const allSyns = [...shownSyns, ...dmSyns];
+
+    html += `<div class="meaning-block datamuse-block">
+      <div style="font-size:0.75rem;color:var(--text2);margin-bottom:10px;display:flex;align-items:center;gap:6px">
+        <span style="background:var(--surface2);border-radius:6px;padding:2px 8px;font-weight:600">Datamuse</span>
+        <span>풍부한 유의어·반의어 데이터베이스</span>
+      </div>`;
+
+    if (dmSyns.length > 0) {
+      html += `<div class="word-tags">
+        <span class="word-tags-label syn">유의어 추가</span>
+        ${dmSyns.slice(0, 15).map(s =>
+          `<button class="synonym-tag" onclick="searchWord('${esc(s)}')">${esc(s)}</button>`
+        ).join('')}
+      </div>`;
+    }
+    if (allAnts.length > 0) {
+      html += `<div class="word-tags">
+        <span class="word-tags-label ant">반의어</span>
+        ${allAnts.slice(0, 15).map(s =>
+          `<button class="antonym-tag" onclick="searchWord('${esc(s)}')">${esc(s)}</button>`
+        ).join('')}
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
   html += `</div>`;
   container.innerHTML = html;
 }
 
-function renderMWResults(container, entries) {
+function renderMWResults(container, entries, datamuse = { synonyms: [], antonyms: [] }) {
   let html = '';
   for (const entry of entries.slice(0, 3)) {
     const word = (entry.hwi?.hw || '').replace(/\*/g, '');
@@ -1082,7 +1144,34 @@ function renderMWResults(container, entries) {
         }
       }
     }
-    html += `</div></div>`;
+    html += `</div>`;
+
+    // Datamuse 유의어/반의어 섹션 (첫 번째 entry에만 표시)
+    if (entry === entries[0] && (datamuse.synonyms.length > 0 || datamuse.antonyms.length > 0)) {
+      html += `<div class="meaning-block datamuse-block">
+        <div style="font-size:0.75rem;color:var(--text2);margin-bottom:10px;display:flex;align-items:center;gap:6px">
+          <span style="background:var(--surface2);border-radius:6px;padding:2px 8px;font-weight:600">Datamuse</span>
+          <span>풍부한 유의어·반의어 데이터베이스</span>
+        </div>`;
+      if (datamuse.synonyms.length > 0) {
+        html += `<div class="word-tags">
+          <span class="word-tags-label syn">유의어</span>
+          ${datamuse.synonyms.slice(0, 15).map(s =>
+            `<button class="synonym-tag" onclick="searchWord('${esc(s)}')">${esc(s)}</button>`
+          ).join('')}
+        </div>`;
+      }
+      if (datamuse.antonyms.length > 0) {
+        html += `<div class="word-tags">
+          <span class="word-tags-label ant">반의어</span>
+          ${datamuse.antonyms.slice(0, 15).map(s =>
+            `<button class="antonym-tag" onclick="searchWord('${esc(s)}')">${esc(s)}</button>`
+          ).join('')}
+        </div>`;
+      }
+      html += `</div>`;
+    }
+    html += `</div>`;
   }
   container.innerHTML = html || `<div class="error-card">결과를 표시할 수 없습니다</div>`;
 }
@@ -1107,7 +1196,7 @@ function searchWord(word) {
 // ============================================================
 //  HISTORY
 // ============================================================
-function saveWordToHistory(word, result) {
+function saveWordToHistory(word, result, datamuse = { synonyms: [], antonyms: [] }) {
   const today = todayStr();
   dailyLog[today] = (dailyLog[today] || 0) + 1;
   localStorage.setItem('dapp_daily', JSON.stringify(dailyLog));
@@ -1140,12 +1229,17 @@ function saveWordToHistory(word, result) {
   if (existing) {
     existing.count = (existing.count || 1) + 1;
     existing.lastTs = Date.now();
-    if (defs.length)     existing.defs = defs;
-    if (examples.length) existing.examples = examples;
-    if (synonyms.length) existing.synonyms = synonyms;
-    if (antonyms.length) existing.antonyms = antonyms;
+    // merge datamuse data too
+    const mergedSyns = [...new Set([...synonyms, ...datamuse.synonyms])];
+    const mergedAnts = [...new Set([...antonyms, ...datamuse.antonyms])];
+    if (defs.length)         existing.defs     = defs;
+    if (examples.length)     existing.examples = examples;
+    if (mergedSyns.length)   existing.synonyms = mergedSyns;
+    if (mergedAnts.length)   existing.antonyms = mergedAnts;
   } else {
-    history.unshift({ word, ts: Date.now(), lastTs: Date.now(), count: 1, defs, examples, synonyms, antonyms });
+    const mergedSyns = [...new Set([...synonyms, ...datamuse.synonyms])];
+    const mergedAnts = [...new Set([...antonyms, ...datamuse.antonyms])];
+    history.unshift({ word, ts: Date.now(), lastTs: Date.now(), count: 1, defs, examples, synonyms: mergedSyns, antonyms: mergedAnts });
     if (history.length > 500) history.pop();
   }
   localStorage.setItem('dapp_history', JSON.stringify(history));
