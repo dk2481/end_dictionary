@@ -1680,7 +1680,15 @@ function selectApi(api, silent) {
 function saveSettings() {
   settings.mwKey = document.getElementById('mwKeyInput').value.trim();
   saveAllSettings();
-  showToast('설정이 저장되었습니다');
+  const newPw = document.getElementById('newPwInput').value.trim();
+  if (newPw) {
+    dashPw = newPw;
+    localStorage.setItem('dapp_pw', newPw);
+    document.getElementById('newPwInput').value = '';
+    showToast('설정 및 비밀번호가 저장되었습니다');
+  } else {
+    showToast('설정이 저장되었습니다');
+  }
   closeSettings();
 }
 
